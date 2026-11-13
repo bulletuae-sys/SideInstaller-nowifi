@@ -17,30 +17,35 @@ jobs:
           rustup target add aarch64-apple-ios
           brew install xcodegen
 
-      - name: Bypass Wi-Fi Requirement in Swift Code
+      - name: Bypass Wi-Fi Requirement and SDK Check
         run: |
           python3 - << 'EOF'
-          import glob
+          import glob, os
 
+          # 1. تعديل ملفات Swift لتجاوز Wi-Fi
           for path in glob.glob("ios-app/*.swift"):
               with open(path, "r", encoding="utf-8") as f:
                   code = f.read()
 
-              # 1. جعل NetworkStatus يعتبر الـ Wi-Fi متصلاً دائماً
               code = code.replace("path.usesInterfaceType(.wifi)", "true")
               code = code.replace("@Published private(set) var isOnWiFi: Bool = false", "@Published private(set) var isOnWiFi: Bool = true")
               code = code.replace("self?.isOnWiFi = onWiFi", "self?.isOnWiFi = true")
-
-              # 2. إيقاف أي حظر للتثبيت أو الـ Pairing في الواجهة
               code = code.replace("!networkStatus.isOnWiFi", "false")
               code = code.replace("networkStatus.isOnWiFi", "true")
-
-              # 3. السماح بواجهات النفق المحلي (utun) بجانب en0
               code = code.replace('"en0"', '"en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"')
 
               with open(path, "w", encoding="utf-8") as f:
                   f.write(code)
-          print("Successfully patched all Swift files!")
+
+          # 2. تعديل project.yml لخفض متطلبات إصدار الـ SDK ليتوافق مع سيرفر البناء
+          if os.path.exists("project.yml"):
+              with open("project.yml", "r", encoding="utf-8") as f:
+                  yml = f.read()
+              yml = yml.replace("27.1", "18.0").replace("27.2", "18.0").replace("27.0", "18.0")
+              with open("project.yml", "w", encoding="utf-8") as f:
+                  f.write(yml)
+
+          print("Successfully patched Swift files and project configuration!")
           EOF
 
       - name: Build unsigned IPA
