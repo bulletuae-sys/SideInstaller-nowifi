@@ -1,0 +1,327 @@
+no-wifi.patch: pair this iPhone with Wi-Fi off.
+
+Applies to FrizzleM/SideInstaller (ios-app/). Wi-Fi was only needed so that
+Settings > Privacy & Security > Developer Mode could find SideInstaller over
+Bonjour for the one-time pairing; the install itself runs over LocalDevVPN.
+
+- Install no longer stops, or waits, for Wi-Fi; the "Wi-Fi required" card is gone.
+- When Wi-Fi is off at the start of a pairing, the pairing service is
+  registered with dns_sd on kDNSServiceInterfaceIndexLocalOnly (visible only
+  to clients on this iPhone, such as Settings) with localhost as its target,
+  and the listener binds to :: so it answers on 127.0.0.1 and ::1.
+- With Wi-Fi off the Local Network check can't see its own probe, so it
+  counts silence as granted; an explicit denial still stops the run.
+- With Wi-Fi on, nothing changes. Side by Side still needs Wi-Fi.
+
+Unverified on a device: whether Settings lists a host advertised this way.
+
+diff --git a/ios-app/ContentView.swift b/ios-app/ContentView.swift
+index 61be1a1..d51b325 100644
+--- a/ios-app/ContentView.swift
++++ b/ios-app/ContentView.swift
+@@ -42,14 +42,10 @@ struct ContentView: View {
+                         pairingFileCard.cascadeItem(2)
+                     }
+                     // Most-blocking requirement first: an unsupported iOS, then
+-                    // Wi-Fi if this run must pair, then the missing tunnel.
++                    // the missing tunnel. no-wifi: Wi-Fi is never a requirement.
+                     if !engine.isRunning {
+                         if !engine.osSupported {
+                             osRequirement.cascadeItem(cascade(2))
+-                        // Only a run that pairs itself needs Wi-Fi; an imported
+-                        // pairing file never touches the local network.
+-                        } else if !engine.wifiConnected, engine.needsFreshPairing, engine.canSelfPair {
+-                            wifiRequirement.cascadeItem(cascade(2))
+                         // Not when Install starts LocalDevVPN itself.
+                         } else if !engine.tunnelAvailable {
+                             vpnRequirement.cascadeItem(cascade(2))
+diff --git a/ios-app/Engine.swift b/ios-app/Engine.swift
+index 7892339..f3e75a2 100644
+--- a/ios-app/Engine.swift
++++ b/ios-app/Engine.swift
+@@ -686,10 +686,10 @@ final class Engine {
+         // The install runs over the loopback tunnel, so require it up front,
+         // unless the run can start LocalDevVPN itself (see `ensureNetwork`).
+         refreshNetworkStatus()
+-        guard !needsFreshPairing || wifiConnected else {
+-            setGuide(Guides.wifi)
+-            log("⛔️ Wi-Fi is off, and pairing this iPhone needs it. Connect to a Wi-Fi network, then tap Install again.")
+-            return
++        // no-wifi: with Wi-Fi off, pairing advertises to this iPhone alone
++        // (see `PairingController.advertiseLocalOnly`) instead of stopping here.
++        if needsFreshPairing && !wifiConnected {
++            log("Wi-Fi is off: pairing will advertise to this iPhone only, over loopback.")
+         }
+         guard tunnelAvailable else {
+             // A full-tunnel VPN counts as down until its probe answers, which
+@@ -914,9 +914,8 @@ final class Engine {
+             // Waits for a full-tunnel VPN's probe when there's no fresh answer.
+             let (vpn, wifi, detail) = await readNetworkSettled()
+             publishNetwork(vpn: vpn, wifi: wifi, vpnText: vpn ? "tunnel up" : "no tunnel")
+-            // Only a run that pairs needs Wi-Fi; the tunnel is always required.
+-            let wifiSatisfied = wifi || !needsFreshPairing
+-            if wifiSatisfied && vpn {
++            // no-wifi: only the tunnel is required; Wi-Fi is never waited on.
++            if vpn {
+                 // Install checks this too, but only while a tunnel is up, and
+                 // this run may have started it.
+                 guard deviceIPIsUsable() else {
+@@ -929,20 +928,11 @@ final class Engine {
+                 return
+             }
+             setStep(.network, .waiting)
+-            if !wifiSatisfied {
+-                // Wi-Fi is the prerequisite for pairing, so surface it first.
+-                if announced != "wifi" {
+-                    log("Waiting for Wi-Fi… pairing this iPhone needs it. Connect to a Wi-Fi network.")
+-                    announced = "wifi"
+-                }
+-                setGuide(Guides.wifi)
+-            } else {
+-                if announced != "vpn" {
+-                    log("Waiting for the loopback tunnel… connect LocalDevVPN, ClashMi, or whichever VPN app you use.")
+-                    announced = "vpn"
+-                }
+-                setGuide(Guides.vpn)
++            if announced != "vpn" {
++                log("Waiting for the loopback tunnel… connect LocalDevVPN, ClashMi, or whichever VPN app you use.")
++                announced = "vpn"
+             }
++            setGuide(Guides.vpn)
+             try await Task.sleep(nanoseconds: 1_500_000_000)
+         }
+     }
+diff --git a/ios-app/LocalNetworkAuthorization.swift b/ios-app/LocalNetworkAuthorization.swift
+index d995832..457763e 100644
+--- a/ios-app/LocalNetworkAuthorization.swift
++++ b/ios-app/LocalNetworkAuthorization.swift
+@@ -31,8 +31,14 @@ final class LocalNetworkAuthorization {
+     // ...or this, once the user is back from the alert, so an Allow has time
+     // to restart the browse.
+     private let afterAlertGrace: TimeInterval = 4
+-
+-    func request(timeout: TimeInterval = 60) async -> Bool {
++    // With `grantUnlessDenied`, how long silence must last to count as granted.
++    private let quietGrantDelay: TimeInterval = 5
++
++    /// `grantUnlessDenied`: with Wi-Fi off the probe can't find its own
++    /// service (Bonjour has no network to loop it through), so once the app is
++    /// in front with no denial pending, that silence counts as granted. Only
++    /// an explicit denial answers false then.
++    func request(timeout: TimeInterval = 60, grantUnlessDenied: Bool = false) async -> Bool {
+         await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+             self.continuation = cont
+ 
+@@ -73,6 +79,8 @@ final class LocalNetworkAuthorization {
+             listener?.start(queue: .main)
+             browser.start(queue: .main)
+ 
++            if grantUnlessDenied { scheduleQuietGrant(after: quietGrantDelay) }
++
+             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                 MainActor.assumeIsolated { self?.finish(false) }
+             }
+@@ -131,6 +139,21 @@ final class LocalNetworkAuthorization {
+         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+     }
+ 
++    /// Grants once the app is in front with no denial pending; otherwise
++    /// looks again shortly, until `finish` has answered.
++    private func scheduleQuietGrant(after delay: TimeInterval) {
++        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
++            MainActor.assumeIsolated {
++                guard let self, self.continuation != nil else { return }
++                if self.policyDenied || UIApplication.shared.applicationState != .active {
++                    self.scheduleQuietGrant(after: 1)
++                } else {
++                    self.finish(true)
++                }
++            }
++        }
++    }
++
+     private func cancelDenial() {
+         pendingDenial?.cancel()
+         pendingDenial = nil
+diff --git a/ios-app/NetworkStatus.swift b/ios-app/NetworkStatus.swift
+index 82498fa..0e2f8cc 100644
+--- a/ios-app/NetworkStatus.swift
++++ b/ios-app/NetworkStatus.swift
+@@ -296,6 +296,11 @@ enum NetworkStatus {
+         interfaces().contains { $0.ipv4 == deviceIP }
+     }
+ 
++    /// Whether Wi-Fi (`en0`) has an address: the same test `scan` uses.
++    static var hasWiFi: Bool {
++        interfaces().contains { $0.name == "en0" }
++    }
++
+     /// Extra local addresses to try when the device's tunnel listener gives a
+     /// port but no host. Wi-Fi (`en0`) first, since remote pairing runs over it.
+     /// Loopback and tunnel interfaces are excluded; they're already tried.
+diff --git a/ios-app/PairingController.swift b/ios-app/PairingController.swift
+index 8e09483..58a6f2c 100644
+--- a/ios-app/PairingController.swift
++++ b/ios-app/PairingController.swift
+@@ -1,5 +1,6 @@
+ import Foundation
+ import SideInstallerFFI
++import dnssd
+ 
+ /// Somewhere outside the app that shows this iPhone's pairing code while the
+ /// app is behind Settings.
+@@ -60,6 +61,8 @@ final class PairingController {
+     }
+ 
+     private var netService: NetService?
++    /// no-wifi: the registration `advertiseLocalOnly` made, when Wi-Fi is off.
++    private var localOnlyService: DNSServiceRef?
+     private let localNetwork = LocalNetworkAuthorization()
+     private let keepAlive = KeepAlive()
+     /// Shows this iPhone's pairing code over Settings: the Live Activity, or a
+@@ -134,6 +137,9 @@ final class PairingController {
+         let identifier: String
+         /// Side by Side's PIN display; nil when pairing this iPhone.
+         let peerPIN: (@MainActor (String) -> Void)?
++        /// no-wifi: Wi-Fi was off when this iPhone's run began, so it listens
++        /// on localhost and advertises to this iPhone alone.
++        let loopbackOnly: Bool
+         /// Resolved when the run ends, or when it's cancelled; nil for `start()`.
+         var continuation: CheckedContinuation<PairedDevice, Error>?
+         /// Set by `cancel(_:)`, so the run stops advertising and its end isn't
+@@ -148,13 +154,15 @@ final class PairingController {
+ 
+         init(name: String, outPath: String, altIRK: String, identifier: String,
+              peerPIN: (@MainActor (String) -> Void)?,
+-             continuation: CheckedContinuation<PairedDevice, Error>?) {
++             continuation: CheckedContinuation<PairedDevice, Error>?,
++             loopbackOnly: Bool = false) {
+             self.name = name
+             self.outPath = outPath
+             self.altIRK = altIRK
+             self.identifier = identifier
+             self.peerPIN = peerPIN
+             self.continuation = continuation
++            self.loopbackOnly = loopbackOnly
+         }
+ 
+         deinit { si_pairing_cancel_free(cancelHandle) }
+@@ -191,7 +199,8 @@ final class PairingController {
+         // Derived from the name, as when this iPhone first paired: its record
+         // is keyed by that identifier.
+         HostRun(name: hostName, outPath: Self.pairingFilePath(), altIRK: Self.storedAltIRK,
+-                identifier: "", peerPIN: nil, continuation: continuation)
++                identifier: "", peerPIN: nil, continuation: continuation,
++                loopbackOnly: !NetworkStatus.hasWiFi)
+     }
+ 
+     // MARK: Pairing another iPhone (Side by Side)
+@@ -251,7 +260,7 @@ final class PairingController {
+         engine.log("RPPairing: requesting Local Network permission…")
+ 
+         Task {
+-            guard await localNetwork.request() else {
++            guard await localNetwork.request(grantUnlessDenied: run.loopbackOnly) else {
+                 engine.log("RPPairing: Local Network permission DENIED. Enable it in Settings › SideInstaller › Local Network, then retry.")
+                 if run.isThisDevice { engine.pairingStatus = L("Local Network denied") }
+                 end(run)
+@@ -276,7 +285,9 @@ final class PairingController {
+     }
+ 
+     private func runHost(_ run: HostRun) {
+-        let bind = bindAddress
++        // no-wifi: `::` takes IPv4 and IPv6 alike, so Settings reaches the
++        // listener at either of localhost's addresses.
++        let bind = run.loopbackOnly ? "::" : bindAddress
+         let name = run.name
+         let model = hostModel
+         let outPath = run.outPath
+@@ -425,15 +436,20 @@ final class PairingController {
+         // advertise it.
+         guard let run = current, !run.cancelled else { return }
+         stopAdvertising()
+-        engine.log("RPPairing: advertising _remotepairing-pairable-host._tcp \(serviceID) on port \(port)")
+-        let service = NetService(
+-            domain: "",
+-            type: "_remotepairing-pairable-host._tcp.",
+-            name: serviceID,
+-            port: port)
+-        service.setTXTRecord(NetService.data(fromTXTRecord: txt))
+-        service.publish()
+-        netService = service
++        if run.loopbackOnly {
++            engine.log("RPPairing: Wi-Fi is off, advertising _remotepairing-pairable-host._tcp \(serviceID) on port \(port) to this iPhone only")
++            advertiseLocalOnly(serviceID: serviceID, port: port, txt: txt)
++        } else {
++            engine.log("RPPairing: advertising _remotepairing-pairable-host._tcp \(serviceID) on port \(port)")
++            let service = NetService(
++                domain: "",
++                type: Self.serviceType,
++                name: serviceID,
++                port: port)
++            service.setTXTRecord(NetService.data(fromTXTRecord: txt))
++            service.publish()
++            netService = service
++        }
+         if run.isThisDevice {
+             engine.pairingStatus = L("advertising — open Settings › Privacy & Security › Developer Mode")
+         }
+@@ -456,6 +472,58 @@ final class PairingController {
+     private func stopAdvertising() {
+         netService?.stop()
+         netService = nil
++        if let ref = localOnlyService {
++            DNSServiceRefDeallocate(ref)
++            localOnlyService = nil
++        }
++    }
++
++    /// The service type Settings browses for pairable hosts.
++    private static let serviceType = "_remotepairing-pairable-host._tcp."
++
++    /// no-wifi: registers the service for this iPhone alone.
++    ///
++    /// With Wi-Fi off there's no local network for `NetService` to advertise
++    /// on. dns_sd gives a service registered on
++    /// `kDNSServiceInterfaceIndexLocalOnly` to every client on this iPhone
++    /// browsing on any interface, which is how Settings fills its
++    /// “Pair with …” list. The SRV target is `localhost`, where the listener,
++    /// bound to `::`, answers over IPv4 and IPv6.
++    private func advertiseLocalOnly(serviceID: String, port: Int32, txt: [String: Data]) {
++        let record = NetService.data(fromTXTRecord: txt)
++        // kDNSServiceInterfaceIndexLocalOnly is ((uint32_t)-1), a macro Swift
++        // doesn't import.
++        let localOnly = UInt32.max
++        var ref: DNSServiceRef?
++        let err = record.withUnsafeBytes { bytes in
++            DNSServiceRegister(&ref, 0, localOnly, serviceID, Self.serviceType, nil, "localhost.",
++                               UInt16(truncatingIfNeeded: port).bigEndian,
++                               UInt16(truncatingIfNeeded: record.count), bytes.baseAddress,
++                               localOnlyRegistered, nil)
++        }
++        guard Int(err) == kDNSServiceErr_NoError, let registered = ref else {
++            engine.log("RPPairing: ⚠️ couldn't register \(serviceID) for this iPhone (dns_sd error \(err)).")
++            return
++        }
++        let started = DNSServiceSetDispatchQueue(registered, DispatchQueue.main)
++        guard Int(started) == kDNSServiceErr_NoError else {
++            DNSServiceRefDeallocate(registered)
++            engine.log("RPPairing: ⚠️ couldn't start registering \(serviceID) (dns_sd error \(started)).")
++            return
++        }
++        localOnlyService = registered
++    }
++}
++
++/// no-wifi: how the local-only registration went. Runs on the main queue.
++private let localOnlyRegistered: DNSServiceRegisterReply = { _, _, error, name, _, _, _ in
++    let service = name.map { String(cString: $0) } ?? "the service"
++    if Int(error) == kDNSServiceErr_NoError {
++        Engine.shared.log("RPPairing: \(service) is registered for this iPhone. Settings › Privacy & Security › Developer Mode should now list “Pair with SideInstaller”.")
++    } else if Int(error) == kDNSServiceErr_PolicyDenied {
++        Engine.shared.log("RPPairing: ⚠️ iOS refused to register \(service): Local Network is off for SideInstaller.")
++    } else {
++        Engine.shared.log("RPPairing: ⚠️ registering \(service) for this iPhone failed (dns_sd error \(error)).")
+     }
+ }
+ 

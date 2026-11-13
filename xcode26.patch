@@ -1,0 +1,66 @@
+xcode26.patch: build with Xcode 26 (iOS 26.x SDK) when no Xcode 27 is available.
+
+Applies to FrizzleM/SideInstaller (ios-app/). Removes the two calls to iOS 27
+APIs that the iOS 26 SDK doesn't have: BGTaskScheduler's async
+submitTaskRequest (the synchronous submit is used on every iOS) and
+AVAudioSession's iOS 27 interruption notifications (interruptionNotification
+still handles interruptions). Built with an SDK before 27.1, the app runs in a
+window on the iPhone Duo; on other iPhones it is the same.
+
+diff --git a/ios-app/InstallActivity.swift b/ios-app/InstallActivity.swift
+index 50fe4cd..457966c 100644
+--- a/ios-app/InstallActivity.swift
++++ b/ios-app/InstallActivity.swift
+@@ -433,21 +433,12 @@ final class InstallActivity {
+         // A task iOS only queues would start after the user stopped waiting.
+         request.strategy = .fail
+         taskID = identifier
+-        if #available(iOS 27.0, *) {
+-            // Not from the main thread, the header says.
+-            Task.detached { [weak self] in
+-                do {
+-                    try await BGTaskScheduler.shared.submitTaskRequest(request)
+-                } catch {
+-                    await self?.taskRefused(identifier, error)
+-                }
+-            }
+-        } else {
+-            do {
+-                try BGTaskScheduler.shared.submit(request)
+-            } catch {
+-                taskRefused(identifier, error)
+-            }
++        // xcode26: the iOS 26 SDK has no submitTaskRequest(_:), iOS 27's
++        // async submit, so every iOS takes the synchronous one.
++        do {
++            try BGTaskScheduler.shared.submit(request)
++        } catch {
++            taskRefused(identifier, error)
+         }
+         return true
+     }
+diff --git a/ios-app/KeepAlive.swift b/ios-app/KeepAlive.swift
+index cf97360..1036e3c 100644
+--- a/ios-app/KeepAlive.swift
++++ b/ios-app/KeepAlive.swift
+@@ -167,17 +167,9 @@ final class KeepAlive: NSObject {
+             default: break
+             }
+         }
+-        if #available(iOS 27.0, *) {
+-            // While it plays, this app never deactivates the session itself.
+-            observe(AVAudioSession.didBecomeInactiveNotification) { me, note in
+-                let context = note.userInfo?[AVAudioSession.deactivationContextKey]
+-                    as? AVAudioSession.DeactivationContext
+-                if context?.source != .app { me.interruptionBegan() }
+-            }
+-            observe(AVAudioSession.resumptionRecommendationNotification) { me, _ in
+-                me.interruptionEnded()
+-            }
+-        }
++        // xcode26: iOS 27's didBecomeInactive and resumptionRecommendation
++        // notifications aren't in the iOS 26 SDK; interruptionNotification
++        // above covers the same ground.
+         // AirPods connecting, headphones unplugged, CarPlay.
+         observe(AVAudioSession.routeChangeNotification) { me, note in
+             let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
