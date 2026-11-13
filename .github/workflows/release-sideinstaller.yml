@@ -1,77 +1,73 @@
 name: Build SideInstaller (No Wi-Fi)
 
+# Builds an unsigned IPA from the upstream sources with no-wifi.patch applied
+# (pairing with Wi-Fi off). The sources stay identical to FrizzleM/SideInstaller,
+# so "Sync fork" keeps working; the patches are applied at build time and the
+# run stops if upstream has changed the lines they touch.
+#
+# SideInstaller is developed on Xcode 27.1. GitHub's macOS runners don't have
+# Xcode 27 yet, so where it's missing the newest Xcode 26 builds it, with
+# xcode26.patch applied as well.
+
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label (a GitHub image, or a self-hosted Mac)"
+        required: false
+        default: macos-26
   push:
     branches: [ main ]
 
 jobs:
   build-ipa:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Select Xcode
+        shell: bash
+        run: |
+          app="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -z "$app" ]; then
+            app="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+            if [ -z "$app" ]; then
+              echo "::error::No Xcode 26 or 27 on this runner."
+              exit 1
+            fi
+            echo "XCODE26=1" >> "$GITHUB_ENV"
+            echo "MIN_IOS_SDK=26.0" >> "$GITHUB_ENV"
+            echo "::notice::No Xcode 27 on this runner: building with $(basename "$app") and xcode26.patch."
+          fi
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$app/Contents/Developer" xcodebuild -version
+
+      - name: Apply patches
+        shell: bash
+        run: |
+          git apply --check -v no-wifi.patch
+          git apply no-wifi.patch
+          if [ "${XCODE26:-0}" = 1 ]; then
+            git apply --check -v xcode26.patch
+            git apply xcode26.patch
+          fi
+          git --no-pager diff --stat
+
       - name: Install Rust target and XcodeGen
+        shell: bash
         run: |
           rustup target add aarch64-apple-ios
-          brew install xcodegen
-
-      - name: Fix Code and Bypass Wi-Fi & SDK Restrictions
-        run: |
-          python3 - << 'EOF'
-          import glob, os
-
-          # 1. إصلاح وتجاوز قيود الـ Wi-Fi في ملفات الـ Swift
-          for path in glob.glob("ios-app/*.swift"):
-              with open(path, "r", encoding="utf-8") as f:
-                  code = f.read()
-
-              code = code.replace("path.usesInterfaceType(.wifi)", "true")
-              code = code.replace("@Published private(set) var isOnWiFi: Bool = false", "@Published private(set) var isOnWiFi: Bool = true")
-              code = code.replace("self?.isOnWiFi = onWiFi", "self?.isOnWiFi = true")
-              code = code.replace("!networkStatus.isOnWiFi", "false")
-              code = code.replace("networkStatus.isOnWiFi", "true")
-              
-              # تصحيح صياغة واجهات الشبكة لتتطابق نحوياً مع Swift
-              code = code.replace('$0.name == "en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"', '$0.name == "en0" || $0.name.hasPrefix("utun")')
-              code = code.replace('$0.name != "en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"', '$0.name != "en0"')
-
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(code)
-
-          # 2. معالجة الدوال الخاصة بـ iOS 27 غير الموجودة في SDK 18.5
-          install_path = "ios-app/InstallActivity.swift"
-          if os.path.exists(install_path):
-              with open(install_path, "r", encoding="utf-8") as f:
-                  ic = f.read()
-              # تحويل استدعاءات الخلفية غير المتوافقة إلى أكواد فارغة آمنة أثناء البناء
-              ic = ic.replace("BGContinuedProcessingTask", "Any")
-              ic = ic.replace("BGContinuedProcessingTaskRequest", "Any")
-              with open(install_path, "w", encoding="utf-8") as f:
-                  f.write(ic)
-
-          route_path = "ios-app/RoutePlanner.swift"
-          if os.path.exists(route_path):
-              with open(route_path, "r", encoding="utf-8") as f:
-                  rc = f.read()
-              rc = rc.replace("MKReverseGeocodingRequest", "CLGeocoder")
-              with open(route_path, "w", encoding="utf-8") as f:
-                  f.write(rc)
-
-          print("Successfully patched all files for Xcode 16.4 / iOS 18.5 SDK!")
-          EOF
+          command -v xcodegen >/dev/null || brew install xcodegen
 
       - name: Build unsigned IPA
-        run: |
-          chmod +x build-rust.sh scripts/build-ipa.sh scripts/export-ipa.sh
-          ./scripts/build-ipa.sh
-          ls -la
+        shell: bash
+        run: bash scripts/build-ipa.sh
 
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: SideInstaller-NoWiFi-IPA
-          path: |
-            *.ipa
-            build/*.ipa
+          path: build/SideInstaller.ipa
+          if-no-files-found: error
