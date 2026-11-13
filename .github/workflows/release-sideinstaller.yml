@@ -26,14 +26,17 @@ jobs:
               with open(path, "r", encoding="utf-8") as f:
                   code = f.read()
 
-              # 1. جعل NetworkStatus يعتبر الـ Wi-Fi متصلاً دائماً طالما هناك اتصال أو نفق VPN
+              # 1. جعل NetworkStatus يعتبر الـ Wi-Fi متصلاً دائماً
               code = code.replace("path.usesInterfaceType(.wifi)", "true")
               code = code.replace("@Published private(set) var isOnWiFi: Bool = false", "@Published private(set) var isOnWiFi: Bool = true")
               code = code.replace("self?.isOnWiFi = onWiFi", "self?.isOnWiFi = true")
 
-              # 2. إيقاف حظر التثبيت والـ Pairing في الواجهة عند غياب الـ Wi-Fi
+              # 2. إيقاف أي حظر للتثبيت أو الـ Pairing في الواجهة
               code = code.replace("!networkStatus.isOnWiFi", "false")
               code = code.replace("networkStatus.isOnWiFi", "true")
+
+              # 3. السماح بواجهات النفق المحلي (utun) بجانب en0
+              code = code.replace('"en0"', '"en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"')
 
               with open(path, "w", encoding="utf-8") as f:
                   f.write(code)
@@ -44,9 +47,12 @@ jobs:
         run: |
           chmod +x build-rust.sh scripts/build-ipa.sh scripts/export-ipa.sh
           ./scripts/build-ipa.sh
+          ls -la
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SideInstaller-NoWiFi-IPA
-          path: build/*.ipa
+          path: |
+            *.ipa
+            build/*.ipa
