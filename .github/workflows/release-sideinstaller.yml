@@ -17,12 +17,12 @@ jobs:
           rustup target add aarch64-apple-ios
           brew install xcodegen
 
-      - name: Bypass Wi-Fi Requirement and SDK Check
+      - name: Bypass Wi-Fi and SDK Version Check
         run: |
           python3 - << 'EOF'
           import glob, os
 
-          # 1. تعديل ملفات Swift لتجاوز Wi-Fi
+          # 1. تعديل ملفات Swift لتجاوز فحص الـ Wi-Fi والشبكة
           for path in glob.glob("ios-app/*.swift"):
               with open(path, "r", encoding="utf-8") as f:
                   code = f.read()
@@ -37,15 +37,17 @@ jobs:
               with open(path, "w", encoding="utf-8") as f:
                   f.write(code)
 
-          # 2. تعديل project.yml لخفض متطلبات إصدار الـ SDK ليتوافق مع سيرفر البناء
-          if os.path.exists("project.yml"):
-              with open("project.yml", "r", encoding="utf-8") as f:
-                  yml = f.read()
-              yml = yml.replace("27.1", "18.0").replace("27.2", "18.0").replace("27.0", "18.0")
-              with open("project.yml", "w", encoding="utf-8") as f:
-                  f.write(yml)
+          # 2. تعديل ملفات فحص الأخطاء أو السكريبتات التي تمنع إصدار SDK القديم
+          for path in glob.glob("ios-app/*.swift") + glob.glob("scripts/*.sh") + glob.glob("*.sh"):
+              if os.path.exists(path):
+                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+                  # خفض أو إلغاء شرط متطلبات الإصدار العالي
+                  content = content.replace("27.1", "18.0").replace("27.2", "18.0").replace("27.0", "18.0")
+                  with open(path, "w", encoding="utf-8") as f:
+                      f.write(content)
 
-          print("Successfully patched Swift files and project configuration!")
+          print("Successfully bypassed SDK and Wi-Fi checks!")
           EOF
 
       - name: Build unsigned IPA
