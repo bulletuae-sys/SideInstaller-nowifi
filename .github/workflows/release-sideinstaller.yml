@@ -17,12 +17,12 @@ jobs:
           rustup target add aarch64-apple-ios
           brew install xcodegen
 
-      - name: Bypass Wi-Fi and SDK Version Check
+      - name: Fix Code and Bypass Wi-Fi & SDK Restrictions
         run: |
           python3 - << 'EOF'
           import glob, os
 
-          # 1. تعديل ملفات Swift لتجاوز فحص الـ Wi-Fi والشبكة
+          # 1. إصلاح وتجاوز قيود الـ Wi-Fi في ملفات الـ Swift
           for path in glob.glob("ios-app/*.swift"):
               with open(path, "r", encoding="utf-8") as f:
                   code = f.read()
@@ -32,22 +32,34 @@ jobs:
               code = code.replace("self?.isOnWiFi = onWiFi", "self?.isOnWiFi = true")
               code = code.replace("!networkStatus.isOnWiFi", "false")
               code = code.replace("networkStatus.isOnWiFi", "true")
-              code = code.replace('"en0"', '"en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"')
+              
+              # تصحيح صياغة واجهات الشبكة لتتطابق نحوياً مع Swift
+              code = code.replace('$0.name == "en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"', '$0.name == "en0" || $0.name.hasPrefix("utun")')
+              code = code.replace('$0.name != "en0", "utun0", "utun1", "utun2", "utun3", "utun4", "lo0"', '$0.name != "en0"')
 
               with open(path, "w", encoding="utf-8") as f:
                   f.write(code)
 
-          # 2. تعديل ملفات فحص الأخطاء أو السكريبتات التي تمنع إصدار SDK القديم
-          for path in glob.glob("ios-app/*.swift") + glob.glob("scripts/*.sh") + glob.glob("*.sh"):
-              if os.path.exists(path):
-                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                      content = f.read()
-                  # خفض أو إلغاء شرط متطلبات الإصدار العالي
-                  content = content.replace("27.1", "18.0").replace("27.2", "18.0").replace("27.0", "18.0")
-                  with open(path, "w", encoding="utf-8") as f:
-                      f.write(content)
+          # 2. معالجة الدوال الخاصة بـ iOS 27 غير الموجودة في SDK 18.5
+          install_path = "ios-app/InstallActivity.swift"
+          if os.path.exists(install_path):
+              with open(install_path, "r", encoding="utf-8") as f:
+                  ic = f.read()
+              # تحويل استدعاءات الخلفية غير المتوافقة إلى أكواد فارغة آمنة أثناء البناء
+              ic = ic.replace("BGContinuedProcessingTask", "Any")
+              ic = ic.replace("BGContinuedProcessingTaskRequest", "Any")
+              with open(install_path, "w", encoding="utf-8") as f:
+                  f.write(ic)
 
-          print("Successfully bypassed SDK and Wi-Fi checks!")
+          route_path = "ios-app/RoutePlanner.swift"
+          if os.path.exists(route_path):
+              with open(route_path, "r", encoding="utf-8") as f:
+                  rc = f.read()
+              rc = rc.replace("MKReverseGeocodingRequest", "CLGeocoder")
+              with open(route_path, "w", encoding="utf-8") as f:
+                  f.write(rc)
+
+          print("Successfully patched all files for Xcode 16.4 / iOS 18.5 SDK!")
           EOF
 
       - name: Build unsigned IPA
